@@ -45,9 +45,9 @@ log_dns_records() {
         CURRENT_TIME=$(date +"%Y-%m-%d %H:%M:%S")
         
         if [ -n "$NAMESERVER" ]; then
-            DNS_OUTPUT=$(dig "$RECORD_TYPE" "$DOMAIN" @"$NAMESERVER")
+            DNS_OUTPUT=$(dig +multiline "$RECORD_TYPE" "$DOMAIN" @"$NAMESERVER")
         else
-            DNS_OUTPUT=$(dig "$RECORD_TYPE" "$DOMAIN")
+            DNS_OUTPUT=$(dig +multiline "$RECORD_TYPE" "$DOMAIN")
         fi
         
         # Extract the ANSWER SECTION
@@ -60,7 +60,49 @@ log_dns_records() {
             
             echo "$CURRENT_TIME - $RECORD_TYPE: $RECORD_DATA (TTL: $TTL)" | tee -a "$LOGFILE"
         done <<< "$ANSWER_SECTION"
-
+	
+	# Special handling for SOA record to extract the serial number
+	if [ "$RECORD_TYPE" == "SOA" ]; then
+	    # Extract the complete multiline SOA record from DNS output
+	    SOA_MULTILINE=$(echo "$DNS_OUTPUT" | awk '
+	        BEGIN { in_soa = 0; soa_record = "" }
+	        /IN SOA/ { 
+	            in_soa = 1
+	            soa_record = $0
+	            if (index($0, ")") > 0) {
+	                print soa_record
+	                exit
+	            }
+	            next
+	        }
+	        in_soa == 1 {
+	            soa_record = soa_record " " $0
+	            if (index($0, ")") > 0) {
+	                print soa_record
+	                exit
+	            }
+	        }
+	    ')
+    
+	    if [ -n "$SOA_MULTILINE" ]; then
+	        # Clean the multiline SOA: remove parentheses, newlines, and extra spaces
+	        SOA_CLEAN=$(echo "$SOA_MULTILINE" | tr -d '\n()' | sed 's/  */ /g' | xargs)
+	        
+	        # Parse the cleaned SOA record: DOMAIN TTL IN SOA MNAME RNAME SERIAL REFRESH RETRY EXPIRE MINIMUM
+	        read -r DOMAIN_NAME TTL_VAL IN_CLASS SOA_TYPE MNAME RNAME SERIAL REFRESH RETRY EXPIRE MINIMUM <<< "$SOA_CLEAN"
+	        
+	        # Validate that SERIAL is numeric
+	        if [[ "$SERIAL" =~ ^[0-9]+$ ]]; then
+	            echo "$CURRENT_TIME - SOA: $MNAME $RNAME $SERIAL $REFRESH $RETRY $EXPIRE $MINIMUM (TTL: $TTL_VAL)" | tee -a "$LOGFILE"
+	            echo "$CURRENT_TIME - SOA Serial Number: $SERIAL" | tee -a "$LOGFILE"
+	        else
+	            echo "$CURRENT_TIME - SOA: Parse error - serial number not found: '$SERIAL'" | tee -a "$LOGFILE"
+	        fi
+	    else
+	        echo "$CURRENT_TIME - SOA: No SOA record found" | tee -a "$LOGFILE"
+	    fi
+	fi
+	
         echo "----------------------------------------" | tee -a "$LOGFILE"
     done
 
@@ -69,7 +111,6 @@ log_dns_records() {
 
 # Run the logging function
 log_dns_records
-
 
 # Querying the log file post-creation
 # 
